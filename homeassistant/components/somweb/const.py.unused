@@ -1,0 +1,9 @@
+# """Constants for the SOMweb component."""
+# import logging
+
+# LOGGER = logging.getLogger(__package__)
+# DOMAIN = "somweb"
+
+# CONF_URL = "url"
+# CONF_USERNAME = "username"
+# CONF_PASSWORD = "password"

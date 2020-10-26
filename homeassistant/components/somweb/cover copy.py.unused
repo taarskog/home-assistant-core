@@ -1,0 +1,148 @@
+"""Platform for operating SOMMER garage doors."""
+
+import logging
+from homeassistant.components.cover import (
+    DEVICE_CLASS_GARAGE,
+    SUPPORT_CLOSE,
+    SUPPORT_OPEN,
+    CoverEntity,
+    STATE_CLOSED,
+    STATE_OPEN,
+    PLATFORM_SCHEMA,
+)
+
+from homeassistant.const import (
+    CONF_ID,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+)
+
+from somweb import DoorStatusType, SomwebClient as Client
+
+# from . import CLIENT as client
+
+import voluptuous as vol
+from voluptuous.schema_builder import Self
+
+import homeassistant.helpers.config_validation as cv
+
+_LOGGER = logging.getLogger(__name__)
+
+DOMAIN = "somweb"
+
+CLIENT = None
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_ID): cv.string,
+        vol.Required(CONF_USERNAME): cv.string,
+        vol.Required(CONF_PASSWORD): cv.string,
+    }
+)
+
+# PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(  # vol.Schema(
+#     {
+#         DOMAIN: vol.Schema(
+#             {
+#                 vol.Required(CONF_ID): cv.string,
+#                 vol.Required(CONF_USERNAME): cv.string,
+#                 vol.Required(CONF_PASSWORD): cv.string,
+#             }
+#         )
+#     },
+#     #extra=vol.ALLOW_EXTRA,
+# )
+
+
+def setup_platform(hass, config, add_entities, discovery_info=None):
+    """Set up the SOMweb platform."""
+    # """Set up the SOMweb component."""
+    global CLIENT  # pylint: disable=global-statement.
+
+    # username = config[DOMAIN][CONF_USERNAME]
+    # password = config[DOMAIN][CONF_PASSWORD]
+    # somWebUDI = config[DOMAIN][CONF_ID]
+    username = config[CONF_USERNAME]
+    password = config[CONF_PASSWORD]
+    somWebUDI = config[CONF_ID]
+
+    CLIENT = Client(somWebUDI, username, password)
+
+    # Verify that passed in configuration works.
+    if not CLIENT.authenticate():
+        _LOGGER.warn("Failed to authenticate")
+        return False
+
+    entities = [SomWebDoor(door) for door in CLIENT.getDoors()]
+    add_entities(entities, True)
+    return True
+
+
+somweb_state_to_cover_state = {
+    DoorStatusType.Closed: STATE_CLOSED,
+    DoorStatusType.Open: STATE_OPEN,
+}
+
+
+class SomWebDoor(CoverEntity):
+    """Representation of a SOMweb Garage Door."""
+
+    def __init__(self, door):
+        self._id = door.id
+        self._name = door.name
+        self._state = None
+        self._unique_id = f"{CLIENT.udi}_{door.id}"
+
+    @property
+    def unique_id(self):
+        """Unique id of the cover."""
+        return self._unique_id
+
+    @property
+    def name(self):
+        """Name of the cover."""
+        return self._name
+
+    @property
+    def current_cover_position(self):
+        """Current position where 0 menas closed and 100 is fully open."""
+        return 0 if self._state == STATE_CLOSED else 100
+
+    @property
+    def is_closed(self):
+        """Return the state of the cover."""
+        return self._state == STATE_CLOSED
+
+    @property
+    def device_class(self):
+        """Return the class of this device, from component DEVICE_CLASSES."""
+        return DEVICE_CLASS_GARAGE
+
+    @property
+    def supported_features(self):
+        return SUPPORT_OPEN | SUPPORT_CLOSE
+
+    def update(self):
+        try:
+            state = CLIENT.getDoorStatus(self._id)
+            self._state = somweb_state_to_cover_state[state]
+        except:
+            _LOGGER.warn(
+                "Exception getting status for door %s - trying to re-authenticate",
+                self._id,
+            )
+
+            if CLIENT.authenticate():
+                _LOGGER.info("Re-authenticate succeeded")
+                state = CLIENT.getDoorStatus(self._id)
+                self._state = somweb_state_to_cover_state[state]
+            else:
+                _LOGGER.error("Failed to re-authenticate")
+
+    def open_cover(self, **kwargs):
+        """Open cover."""
+        CLIENT.openDoor(self._id)
+
+    def close_cover(self, **kwargs):
+        """Close cover."""
+        CLIENT.closeDoor(self._id)
