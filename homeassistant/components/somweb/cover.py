@@ -1,31 +1,18 @@
-"""Platform for operating SOMMER garage doors."""
-
 import logging
-
-from somweb import DoorStatusType, SomwebClient as Client
 import voluptuous as vol
-from voluptuous.schema_builder import Self
-
+from homeassistant.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME
+import homeassistant.helpers.config_validation as cv
 from homeassistant.components.cover import (
     DEVICE_CLASS_GARAGE,
     PLATFORM_SCHEMA,
-    STATE_CLOSED,
-    STATE_OPEN,
     SUPPORT_CLOSE,
     SUPPORT_OPEN,
     CoverEntity,
 )
-from homeassistant.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME
-import homeassistant.helpers.config_validation as cv
+from somweb import SomwebClient as Client, DoorStatusType, Door
 
 _LOGGER = logging.getLogger(__name__)
-
-CLIENT = None
-
-STATES_MAP = {
-    DoorStatusType.Closed: STATE_CLOSED,
-    DoorStatusType.Open: STATE_OPEN,
-}
+_TOKEN = None
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -36,36 +23,51 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the SOMweb platform."""
-    global CLIENT  # pylint: disable=global-statement.
-
     username = config[CONF_USERNAME]
     password = config[CONF_PASSWORD]
-    somWebUDI = config[CONF_ID]
+    somweb_udi = config[CONF_ID]
 
-    CLIENT = Client(somWebUDI, username, password)
-
-    # Verify that passed in configuration works.
-    if not CLIENT.authenticate():
-        _LOGGER.warn("Failed to authenticate")
+    client = Client(somweb_udi, username, password)
+    if not await client.is_alive():
+        _LOGGER.error(
+            "SOMweb with provided UDI '%s' not found on this network", somweb_udi
+        )
         return False
 
-    entities = [SomWebDoor(door) for door in CLIENT.getDoors()]
-    _LOGGER.warn(f"Found {len(entities)} door(s).")
-    add_entities(entities)  # , True)
+    auth_result = await client.authenticate()
+    if not auth_result.success:
+        _LOGGER.error("Failed to authenticate (udi=%s)", somweb_udi)
+        return False
+
+    global _TOKEN  # pylint: disable=global-statement.
+    _TOKEN = auth_result.token
+
+    entities = [
+        SomWebDoor(client, door)
+        for door in client.get_doors_from_page_content(auth_result.page_content)
+    ]
+
+    doorCount = len(entities)
+    _LOGGER.info("Found %d door%s.", doorCount, "s" if doorCount > 1 else "")
+    async_add_entities(entities)
     return True
 
 
 class SomWebDoor(CoverEntity):
     """Representation of a SOMweb Garage Door."""
 
-    def __init__(self, door):
-        self._id = door.id
-        self._name = door.name
-        self._state = None
-        self._unique_id = f"{CLIENT.udi}_{door.id}"
-        self._available = True
+    def __init__(self, client: Client, door: Door):
+        self._client: Client = client
+        self._id: int = door.id
+        self._name: str = door.name
+        self._state: DoorStatusType = None
+        self._is_opening: bool = False
+        self._is_closing: bool = False
+        self._unique_id: str = f"{client.udi}_{door.id}"
+        self._available: bool = True
+        self._id_in_log = f"'{self._name} ({client.udi}_{door.id})'"
 
     @property
     def unique_id(self):
@@ -84,13 +86,33 @@ class SomWebDoor(CoverEntity):
 
     @property
     def current_cover_position(self):
-        """Current position where 0 menas closed and 100 is fully open."""
-        return 0 if self._state == STATE_CLOSED else 100
+        """Current position where 0 means closed and 100 is fully open. None if Unknown."""
+        return (
+            0
+            if self._state == DoorStatusType.Closed
+            else 100
+            if self._state == DoorStatusType.Open
+            else None
+        )
 
     @property
     def is_closed(self):
         """Return the state of the cover."""
-        return self._state == STATE_CLOSED
+        return (
+            None
+            if self._state == None or self._state == DoorStatusType.Unknown
+            else self._state == DoorStatusType.Closed
+        )
+
+    @property
+    def is_opening(self):
+        """Return the state of the cover."""
+        return self._is_opening
+
+    @property
+    def is_closing(self):
+        """Return the state of the cover."""
+        return self._is_closing
 
     @property
     def device_class(self):
@@ -101,51 +123,100 @@ class SomWebDoor(CoverEntity):
     def supported_features(self):
         return SUPPORT_OPEN | SUPPORT_CLOSE
 
-    def update(self):
-        self._update(0)
+    async def async_open_cover(self, **kwargs):
+        """Open the cover."""
+        _LOGGER.debug("Open cover %s", self._id_in_log)
 
-    def open_cover(self, **kwargs):
-        """Open cover."""
-        CLIENT.openDoor(self._id)
-
-    def close_cover(self, **kwargs):
-        """Close cover."""
-        CLIENT.closeDoor(self._id)
-
-    def _update(self, retryCount: int):
         try:
-            self._state = STATES_MAP[CLIENT.getDoorStatus(self._id)]
-            self._available = True
+            self._is_opening = True
+            self.async_write_ha_state()
+            if not await self._client.open_door(_TOKEN, self._id):
+                _LOGGER.error("Unable to open cover %s", self._id_in_log)
+            else:
+                await self._client.wait_for_door_state(self._id, DoorStatusType.Open)
         except:
-            self._available = False
-            if retryCount > 0:
-                _LOGGER.error(
-                    "Unable to update status for door %s [retried %d time(s)]",
-                    self._unique_id,
-                    retryCount,
+            _LOGGER.exception("Exception when opening cover %s", self._id_in_log)
+        finally:
+            self._is_opening = False
+            await self._force_update()
+
+    async def async_close_cover(self, **kwargs):
+        """Close cover."""
+        _LOGGER.debug("Close cover %s", self._id_in_log)
+
+        try:
+            self._is_closing = True
+            self.async_write_ha_state()
+            if not await self._client.close_door(_TOKEN, self._id):
+                _LOGGER.error("Unable to close cover %s", self._id_in_log)
+            else:
+                await self._client.wait_for_door_state(self._id, DoorStatusType.Closed)
+        except:
+            _LOGGER.exception("Exception when closing cover %s", self._id_in_log)
+        finally:
+            self._is_closing = False
+            await self._force_update()
+
+    async def _force_update(self):
+        """Force update of data."""
+        _LOGGER.debug("Force update state of cover %s", self._id_in_log)
+        await self.async_update(no_throttle=True)
+        self.async_write_ha_state()
+
+    async def __async_refresh_state(self) -> bool:
+        """Refresh SOMweb cover state."""
+        try:
+            self._state = await self._client.get_door_status(self._id)
+            _LOGGER.debug(
+                "Current state of cover %s is '%s'", self._id_in_log, self._state.name
+            )
+
+            return self._state != DoorStatusType.Unknown
+        except:
+            self._state = DoorStatusType.Unknown
+            _LOGGER.exception(
+                "Exception when getting state of cover %s", self._id_in_log
+            )
+            return False
+
+    async def __async_re_connect(self) -> bool:
+        """Re-connect SOMweb."""
+        try:
+            if not self._client.is_alive():
+                _LOGGER.debug("Somweb with id %s is not alive", self._client.udi)
+                return False
+
+            _LOGGER.debug(
+                "Attempting to re-authenticate somweb for cover %s", self._id_in_log
+            )
+            authResult = await self._client.authenticate()
+            if authResult.success and len(authResult.token) > 0:
+                _LOGGER.info(
+                    "Successfully re-authenticated somweb for cover %s",
+                    self._id_in_log,
                 )
-                return
-
-            _LOGGER.warn(
-                "Exception getting status for door %s - trying to reConnect [retried %d time(s)]",
-                self._unique_id,
-                retryCount,
+                global _TOKEN  # pylint: disable=global-statement.
+                _TOKEN = authResult.token
+                return True
+            else:
+                _LOGGER.warn(
+                    "Failed re-authenticating somweb for cover %s", self._id_in_log
+                )
+        except:
+            _LOGGER.exception(
+                "Exception when re-authenticating somweb for cover %s",
+                self._id_in_log,
             )
 
-            if not self._reConnect():
-                return
+        return False
 
-            self._update(retryCount + 1)
+    # @Throttle(MIN_TIME_BETWEEN_UPDATES)
+    async def async_update(self, **kwargs):
+        """Get the latest status from SOMweb."""
+        if not (
+            await self.__async_refresh_state()
+            or (await self.__async_re_connect() and await self.__async_refresh_state())
+        ):
+            _LOGGER.warn("SOMweb seems to be off the grid. Will continue attempts...")
 
-    def _reConnect(self) -> bool:
-        if not CLIENT.isReachable():
-            _LOGGER.error("Device not reachable when handling door %s", self._unique_id)
-            return False
-
-        if not CLIENT.authenticate():
-            _LOGGER.error(
-                "Re-authentication failed when handling door %s", self._unique_id
-            )
-            return False
-
-        return True
+        self._available = self._state != DoorStatusType.Unknown
