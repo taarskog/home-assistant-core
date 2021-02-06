@@ -125,37 +125,11 @@ class SomWebDoor(CoverEntity):
 
     async def async_open_cover(self, **kwargs):
         """Open the cover."""
-        _LOGGER.debug("Open cover %s", self._id_in_log)
-
-        try:
-            self._is_opening = True
-            self.async_write_ha_state()
-            if not await self._client.open_door(_TOKEN, self._id):
-                _LOGGER.error("Unable to open cover %s", self._id_in_log)
-            else:
-                await self._client.wait_for_door_state(self._id, DoorStatusType.Open)
-        except:
-            _LOGGER.exception("Exception when opening cover %s", self._id_in_log)
-        finally:
-            self._is_opening = False
-            await self._force_update()
+        await self.__async_set_door_position(DoorStatusType.Open)
 
     async def async_close_cover(self, **kwargs):
         """Close cover."""
-        _LOGGER.debug("Close cover %s", self._id_in_log)
-
-        try:
-            self._is_closing = True
-            self.async_write_ha_state()
-            if not await self._client.close_door(_TOKEN, self._id):
-                _LOGGER.error("Unable to close cover %s", self._id_in_log)
-            else:
-                await self._client.wait_for_door_state(self._id, DoorStatusType.Closed)
-        except:
-            _LOGGER.exception("Exception when closing cover %s", self._id_in_log)
-        finally:
-            self._is_closing = False
-            await self._force_update()
+        await self.__async_set_door_position(DoorStatusType.Closed)
 
     async def _force_update(self):
         """Force update of data."""
@@ -179,10 +153,33 @@ class SomWebDoor(CoverEntity):
             )
             return False
 
+    async def __async_set_door_position(self, postion: DoorStatusType) -> bool:
+        """Re-connect SOMweb."""
+        _LOGGER.debug("%s cover %s", postion.name, self._id_in_log)
+
+        try:
+            self._is_opening = postion == DoorStatusType.Open
+            self._is_closing = postion == DoorStatusType.Closed
+            self.async_write_ha_state()
+
+            if await self._client.door_action(_TOKEN, self._id, postion) or (
+                await self.__async_re_connect()
+                and await self._client.door_action(_TOKEN, self._id, postion)
+            ):
+                await self._client.wait_for_door_state(self._id, DoorStatusType.Open)
+            else:
+                _LOGGER.error("Unable to open cover %s", self._id_in_log)
+        except:
+            _LOGGER.exception("Exception when opening cover %s", self._id_in_log)
+        finally:
+            self._is_opening = False
+            self._is_closing = False
+            await self._force_update()
+
     async def __async_re_connect(self) -> bool:
         """Re-connect SOMweb."""
         try:
-            if not self._client.is_alive():
+            if not await self._client.is_alive():
                 _LOGGER.debug("Somweb with id %s is not alive", self._client.udi)
                 return False
 
