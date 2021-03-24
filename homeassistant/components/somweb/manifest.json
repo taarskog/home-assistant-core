@@ -1,12 +1,13 @@
 {
     "domain": "somweb",
-    "name": "SOMMER Smart Home (SOMweb) - Garage Door",
+    "name": "SOMMER (SOMweb)",
     "documentation": "https://github.com/taarskog/home-assistant-core/tree/add-somweb-cover-platform/",
+    "config_flow": true,
     "dependencies": [],
     "codeowners": [
         "@taarskog"
     ],
     "requirements": [
-        "somweb==0.3.4"
+        "somweb==0.3.5"
     ]
 }

@@ -1,7 +1,10 @@
 import logging
+import json
 import voluptuous as vol
+import asyncio
 from homeassistant.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import aiohttp_client
 from homeassistant.components.cover import (
     DEVICE_CLASS_GARAGE,
     PLATFORM_SCHEMA,
@@ -23,18 +26,25 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    return await async_setup_platform(hass, config_entry.data, async_add_entities)
+
+
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the SOMweb platform."""
     username = config[CONF_USERNAME]
     password = config[CONF_PASSWORD]
     somweb_udi = config[CONF_ID]
 
-    client = Client(somweb_udi, username, password)
-    if not await client.is_alive():
+    client = Client(
+        somweb_udi, username, password, aiohttp_client.async_get_clientsession(hass)
+    )
+
+    while not await client.is_alive():
         _LOGGER.error(
             "SOMweb with provided UDI '%s' not found on this network", somweb_udi
         )
-        return False
+        asyncio.sleep(15)
 
     auth_result = await client.authenticate()
     if not auth_result.success:
